@@ -50,24 +50,28 @@ def load_data(args):
         print("Use Blender data set!")
         scene_info = sceneLoadTypeCallbacks["Blender"](
             args.source_path, args.eval, args.add_mask, args.add_depth, 
-            args.add_aerial, args.add_street, center, scale
+            args.add_aerial, args.add_street, center, scale,
+            getattr(args, "input_mode", "images"), getattr(args, "lidar_path", None)
         )
     elif args.data_format == 'colmap':
         print("Use Colmap data set!")
         scene_info = sceneLoadTypeCallbacks["Colmap"](
             args.source_path, args.eval, args.images, args.add_mask, args.add_depth, \
-            args.add_aerial, args.add_street, args.llffhold
+            args.add_aerial, args.add_street, args.llffhold,
+            getattr(args, "input_mode", "images"), getattr(args, "lidar_path", None)
         )
     elif args.data_format == 'city':
         print("Use City data set!")
         scene_info = sceneLoadTypeCallbacks["City"](
             args.source_path, args.eval, args.add_mask, args.add_depth, \
-            args.add_aerial, args.add_street, center, scale, args.llffhold
+            args.add_aerial, args.add_street, center, scale, args.llffhold,
+            getattr(args, "input_mode", "images"), getattr(args, "lidar_path", None)
         )
     elif args.data_format == 'ucgs':
         print("Use UCGS data set!")
         scene_info = sceneLoadTypeCallbacks["UCGS"](
-            args.source_path, args.images, args.add_aerial, args.add_street
+            args.source_path, args.images, args.add_aerial, args.add_street,
+            getattr(args, "input_mode", "images"), getattr(args, "lidar_path", None)
         )
     else:
         assert False, "Could not recognize scene type!"
@@ -505,6 +509,8 @@ if __name__ == "__main__":
         lp.add_depth = dp.add_depth
         lp.add_aerial = dp.add_aerial
         lp.add_street = dp.add_street
+        lp.input_mode = getattr(dp, "input_mode", "images")
+        lp.lidar_path = getattr(dp, "lidar_path", None)
         if lp.data_format == "colmap" or lp.data_format == "city":
             lp.llffhold = dp.llffhold
         if lp.data_format == "blender" or lp.data_format == "city":

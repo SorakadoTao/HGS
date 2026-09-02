@@ -32,6 +32,8 @@ class Scene:
         self.model_path = args.model_path
         self.add_aerial = args.add_aerial
         self.add_street = args.add_street
+        self.input_mode = getattr(args, "input_mode", "images")
+        self.lidar_path = getattr(args, "lidar_path", None)
         self.resolution_scales = args.resolution_scales
         self.loaded_iter = None
         self.gaussians = gaussians
@@ -61,24 +63,27 @@ class Scene:
             print("Use Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](
                 args.source_path, args.eval, args.add_mask, args.add_depth, 
-                args.add_aerial, args.add_street, args.center, args.scale
+                args.add_aerial, args.add_street, args.center, args.scale,
+                self.input_mode, self.lidar_path
             )
         elif args.data_format == 'colmap':
             print("Use Colmap data set!")
             scene_info = sceneLoadTypeCallbacks["Colmap"](
                 args.source_path, args.eval, args.images, args.add_mask, args.add_depth, \
-                args.add_aerial, args.add_street, args.llffhold
+                args.add_aerial, args.add_street, args.llffhold, self.input_mode, self.lidar_path
             )
         elif args.data_format == 'city':
             print("Use City data set!")
             scene_info = sceneLoadTypeCallbacks["City"](
                 args.source_path, args.eval, args.add_mask, args.add_depth, \
-                args.add_aerial, args.add_street, args.center, args.scale, args.llffhold
+                args.add_aerial, args.add_street, args.center, args.scale, args.llffhold,
+                self.input_mode, self.lidar_path
             )
         elif args.data_format == 'ucgs':
             print("Use UCGS data set!")
             scene_info = sceneLoadTypeCallbacks["UCGS"](
-                args.source_path, args.images, args.add_aerial, args.add_street
+                args.source_path, args.images, args.add_aerial, args.add_street,
+                self.input_mode, self.lidar_path
             )
         else:
             assert False, "Could not recognize scene type!"
