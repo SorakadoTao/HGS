@@ -46,6 +46,31 @@ Next, download the following data, and place them under a desired direcory, e.g.
 - The UCGS dataset are provided by the paper author [here](https://drive.google.com/file/d/1DjSB7GqORz5rUvB3KaAMIiGwX1mtmRjb/view). 
 - The MatrixCity dataset can be downloaded from [Hugging Face](https://huggingface.co/datasets/BoDai/MatrixCity/tree/main)/[Openxlab](https://openxlab.org.cn/datasets/bdaibdai/MatrixCity)/[百度网盘[提取码:hqnn]](https://pan.baidu.com/share/init?surl=87P0e5p1hz9t5mgdJXjL1g). 
 
+### Input modes
+
+The dataset configuration's `data_params` now supports two input modes. Both
+modes use aerial (`aerial/`) and street (`street/`) images and their existing
+camera metadata. `input_mode: images` is the default and preserves the current
+behaviour: the loader uses the dataset's regular initial point cloud (such as
+COLMAP SfM points). `input_mode: images_lidar` replaces that initial point
+cloud with a co-registered ground-LiDAR scan.
+
+For LiDAR mode, add the following to the dataset configuration before running
+`preprocess/data_preprocess.py`. `lidar_path` can be absolute or relative to
+`source_path`; supported formats are PLY, LAS, and LAZ. The point cloud must
+use the same world coordinate system as the camera poses. For `blender` and
+`city` datasets, the configured `center` and `scale` are also applied to the
+LiDAR points so they stay aligned with the transformed cameras.
+
+```yaml
+input_mode: images_lidar
+lidar_path: lidar/ground_scan.ply
+```
+
+The generated coarse and fine configs retain these two fields automatically.
+To return to image-only initialization, set `input_mode: images` and omit
+`lidar_path`.
+
 ## Training
 
 For training a small scene like Block_small, first generate the config and then run it:

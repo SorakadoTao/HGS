@@ -28,8 +28,8 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 try:
     import laspy
-except:
-    print("No laspy")
+except ImportError:
+    laspy = None
 from utils.graphics_utils import BasicPointCloud
 import concurrent.futures
 
@@ -81,13 +81,19 @@ def getNerfppNorm(cam_info):
     return {"translate": translate, "radius": radius}
 
 def read_las_file(path):
+    if laspy is None:
+        raise ImportError("LAS/LAZ input requires laspy. Install it with `pip install laspy`.")
     las = laspy.read(path)
     positions = np.vstack((las.x, las.y, las.z)).transpose()
-    try:
+    if all(hasattr(las, channel) for channel in ("red", "green", "blue")):
         colors = np.vstack((las.red, las.green, las.blue)).transpose()
-    except:
-        colors = np.random.rand(positions.shape[0], positions.shape[1])
-    normals = np.random.rand(positions.shape[0], positions.shape[1])
+        colors = colors.astype(np.float32)
+        if colors.max() > 255:
+            colors *= 255.0 / np.iinfo(las.red.dtype).max
+    else:
+        colors = np.full((positions.shape[0], 3), 127, dtype=np.float32)
+    colors /= 255.0
+    normals = np.zeros_like(positions)
 
     return positions, colors, normals
 
@@ -112,7 +118,7 @@ def read_multiple_las_files(paths, ply_path):
             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
     
     elements = np.empty(all_positions.shape[0], dtype=dtype)
-    attributes = np.concatenate((all_positions, all_normals, all_colors), axis=1)
+    attributes = np.concatenate((all_positions, all_normals, all_colors * 255), axis=1)
     elements[:] = list(map(tuple, attributes))
 
     # Create the PlyData object and write to file
@@ -121,6 +127,41 @@ def read_multiple_las_files(paths, ply_path):
     ply_data.write(ply_path)
 
     return BasicPointCloud(points=all_positions, colors=all_colors, normals=all_normals)
+
+
+def load_initial_point_cloud(path, input_mode="images", lidar_path=None, center=None, scale=1.0):
+    """Load the point cloud used to initialize Gaussians.
+
+    ``images`` keeps the dataset's default initialization (for example COLMAP
+    SfM points). ``images_lidar`` uses the supplied ground-LiDAR point cloud
+    instead. The LiDAR path may be absolute or relative to the scene root.
+    """
+    if input_mode == "images":
+        return None, None
+    if input_mode != "images_lidar":
+        raise ValueError("input_mode must be either 'images' or 'images_lidar'.")
+    if not lidar_path:
+        raise ValueError("lidar_path is required when input_mode is 'images_lidar'.")
+
+    resolved_path = lidar_path if os.path.isabs(lidar_path) else os.path.join(path, lidar_path)
+    if not os.path.isfile(resolved_path):
+        raise FileNotFoundError(f"Ground-LiDAR point cloud does not exist: {resolved_path}")
+
+    suffix = Path(resolved_path).suffix.lower()
+    if suffix == ".ply":
+        point_cloud = fetchPly(resolved_path)
+    elif suffix in {".las", ".laz"}:
+        positions, colors, normals = read_las_file(resolved_path)
+        point_cloud = BasicPointCloud(points=positions, colors=colors, normals=normals)
+    else:
+        raise ValueError("Ground-LiDAR point clouds must use .ply, .las, or .laz format.")
+
+    points = point_cloud.points.astype(np.float32, copy=True)
+    points -= np.asarray(center if center is not None else [0, 0, 0], dtype=np.float32)
+    points /= scale
+    point_cloud = BasicPointCloud(points=points, colors=point_cloud.colors, normals=point_cloud.normals)
+    print(f"Using ground-LiDAR point cloud for initialization: {resolved_path}")
+    return point_cloud, resolved_path
 
 def fetchPly(path):
     plydata = PlyData.read(path)
@@ -465,7 +506,8 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, add_aer
     cam_infos = sorted(cam_infos, key = lambda x : x.image_path)
     return cam_infos
 
-def readColmapSceneInfo(path, eval, images, add_mask, add_depth, add_aerial, add_street, llffhold=32):
+def readColmapSceneInfo(path, eval, images, add_mask, add_depth, add_aerial, add_street, llffhold=32,
+                        input_mode="images", lidar_path=None):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -512,19 +554,22 @@ def readColmapSceneInfo(path, eval, images, add_mask, add_depth, add_aerial, add
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "sparse/0/points3D.ply")
-    bin_path = os.path.join(path, "sparse/0/points3D.bin")
-    txt_path = os.path.join(path, "sparse/0/points3D.txt")
-    if not os.path.exists(ply_path):
-        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
-        try:
-            xyz, rgb, _ = read_points3D_binary(bin_path)
-        except:
-            xyz, rgb, _ = read_points3D_text(txt_path)
-        storePly(ply_path, xyz, rgb)
-    # try:
-    print(f'start fetching data from ply file')
-    pcd = fetchPly(ply_path)
+    lidar_pcd, lidar_ply_path = load_initial_point_cloud(path, input_mode, lidar_path)
+    if lidar_pcd is not None:
+        pcd, ply_path = lidar_pcd, lidar_ply_path
+    else:
+        ply_path = os.path.join(path, "sparse/0/points3D.ply")
+        bin_path = os.path.join(path, "sparse/0/points3D.bin")
+        txt_path = os.path.join(path, "sparse/0/points3D.txt")
+        if not os.path.exists(ply_path):
+            print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+            try:
+                xyz, rgb, _ = read_points3D_binary(bin_path)
+            except:
+                xyz, rgb, _ = read_points3D_text(txt_path)
+            storePly(ply_path, xyz, rgb)
+        print("start fetching data from ply file")
+        pcd = fetchPly(ply_path)
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
@@ -533,7 +578,8 @@ def readColmapSceneInfo(path, eval, images, add_mask, add_depth, add_aerial, add
                            ply_path=ply_path)
     return scene_info
 
-def readNerfSyntheticInfo(path, eval, add_mask, add_depth, add_aerial, add_street, center, scale):
+def readNerfSyntheticInfo(path, eval, add_mask, add_depth, add_aerial, add_street, center, scale,
+                          input_mode="images", lidar_path=None):
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", add_mask, add_depth, add_aerial, add_street, center, scale)
     print("Reading Test Transforms")
@@ -544,8 +590,11 @@ def readNerfSyntheticInfo(path, eval, add_mask, add_depth, add_aerial, add_stree
         test_cam_infos = []
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
+    lidar_pcd, lidar_ply_path = load_initial_point_cloud(path, input_mode, lidar_path, center, scale)
     ply_paths = glob.glob(os.path.join(path, "*.ply"))
-    if len(ply_paths)==0:
+    if lidar_pcd is not None:
+        pcd, ply_path = lidar_pcd, lidar_ply_path
+    elif len(ply_paths)==0:
         ply_path = os.path.join(path, "points3d.ply")
         # Since this data set has no colmap data, we start with random points
         num_pts = 10_000
@@ -561,8 +610,9 @@ def readNerfSyntheticInfo(path, eval, add_mask, add_depth, add_aerial, add_stree
         ply_path = ply_paths[0]
         pcd = fetchPly(ply_path)
     
-    pcd.points[:, :] -= center
-    pcd.points[:, :] /= scale  # mainly adapt to params
+    if lidar_pcd is None:
+        pcd.points[:, :] -= center
+        pcd.points[:, :] /= scale  # mainly adapt to params
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
@@ -571,30 +621,39 @@ def readNerfSyntheticInfo(path, eval, add_mask, add_depth, add_aerial, add_stree
                            ply_path=ply_path)
     return scene_info
 
-def readCityInfo(path, eval, add_mask, add_depth, add_aerial, add_street, center, scale, llffhold=32):
+def readCityInfo(path, eval, add_mask, add_depth, add_aerial, add_street, center, scale, llffhold=32,
+                 input_mode="images", lidar_path=None):
     
     json_path = glob.glob(os.path.join(path, f"transforms.json"))[0].split('/')[-1]
     print("Reading Training Transforms from {}".format(json_path))
     
-    # load ply
-    ply_path = glob.glob(os.path.join(path, "*.ply"))[0]
-    if os.path.exists(ply_path):
-        try:
-            pcd = fetchPly(ply_path)
-        except:
-            raise ValueError("must have tiepoints!")
+    lidar_pcd, lidar_ply_path = load_initial_point_cloud(path, input_mode, lidar_path, center, scale)
+    # load default point cloud
+    if lidar_pcd is not None:
+        pcd, ply_path = lidar_pcd, lidar_ply_path
     else:
-        las_paths = glob.glob(os.path.join(path, "LAS/*.las"))
-        las_path = las_paths[0]
-        print(f'las_path: {las_path}')
-        try:
-            pcd = read_multiple_las_files(las_paths, ply_path)
-        except:
-            raise ValueError("Load LAS failed!")
+        ply_paths = glob.glob(os.path.join(path, "*.ply"))
+        if ply_paths:
+            ply_path = ply_paths[0]
+            try:
+                pcd = fetchPly(ply_path)
+            except:
+                raise ValueError("must have tiepoints!")
+        else:
+            las_paths = glob.glob(os.path.join(path, "LAS/*.las"))
+            if not las_paths:
+                raise ValueError("No default point cloud found. Set input_mode to 'images_lidar' and provide lidar_path.")
+            ply_path = os.path.join(path, "points3d.ply")
+            print(f"Loading default LAS point cloud: {las_paths[0]}")
+            try:
+                pcd = read_multiple_las_files(las_paths, ply_path)
+            except Exception as error:
+                raise ValueError("Load LAS failed!") from error
     
     # recenter poses and points clouds
-    pcd.points[:,:] -= center
-    pcd.points[:,:] /=scale # mainly adapt to params
+    if lidar_pcd is None:
+        pcd.points[:,:] -= center
+        pcd.points[:,:] /=scale # mainly adapt to params
     
     # load camera
     cam_infos = readCamerasFromTransforms(path, json_path, add_mask, add_depth, add_aerial, add_street, center, scale)
@@ -620,7 +679,7 @@ def readCityInfo(path, eval, add_mask, add_depth, add_aerial, add_street, center
     return scene_info
 
 
-def readUCGSInfo(path, images, add_aerial, add_street):
+def readUCGSInfo(path, images, add_aerial, add_street, input_mode="images", lidar_path=None):
     print(path)
     if "NYC" in path:
         train_path = os.path.join(path, "traina20g1.5")
@@ -663,19 +722,22 @@ def readUCGSInfo(path, images, add_aerial, add_street):
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
     
-    ply_path = os.path.join(train_path, "sparse/0/points3D.ply")
-    bin_path = os.path.join(train_path, "sparse/0/points3D.bin")
-    txt_path = os.path.join(train_path, "sparse/0/points3D.txt")
-    if not os.path.exists(ply_path):
-        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
-        try:
-            xyz, rgb, _ = read_points3D_binary(bin_path)
-        except:
-            xyz, rgb, _ = read_points3D_text(txt_path)
-        storePly(ply_path, xyz, rgb)
-    # try:
-    print(f'start fetching data from ply file')
-    pcd = fetchPly(ply_path)
+    lidar_pcd, lidar_ply_path = load_initial_point_cloud(path, input_mode, lidar_path)
+    if lidar_pcd is not None:
+        pcd, ply_path = lidar_pcd, lidar_ply_path
+    else:
+        ply_path = os.path.join(train_path, "sparse/0/points3D.ply")
+        bin_path = os.path.join(train_path, "sparse/0/points3D.bin")
+        txt_path = os.path.join(train_path, "sparse/0/points3D.txt")
+        if not os.path.exists(ply_path):
+            print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+            try:
+                xyz, rgb, _ = read_points3D_binary(bin_path)
+            except:
+                xyz, rgb, _ = read_points3D_text(txt_path)
+            storePly(ply_path, xyz, rgb)
+        print("start fetching data from ply file")
+        pcd = fetchPly(ply_path)
     
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
